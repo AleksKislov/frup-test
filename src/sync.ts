@@ -1,15 +1,14 @@
 import * as dotenv from "dotenv";
-import { type ConsumeMessage } from "amqplib";
+const { Timestamp } = require("mongodb");
 import { AnonCustomer, Customer } from "./tools//models";
 import mongoose, { ConnectOptions } from "mongoose";
-import { CONNECT_OPTS, QUEUE } from "./tools/consts";
-import { createSubChannel } from "./tools/channel";
+import { CONNECT_OPTS, BATCH_SIZE } from "./tools/consts";
 import { getAnonCustomer } from "./helpers/anonymise-customer";
-import { endWithErr } from "./helpers/end-with-err";
 import { Store } from "./helpers/store";
+import { timeoutPromise } from "./helpers/timeout-promise";
+import { endWithMsg, endWithErr } from "./helpers/end-process";
 dotenv.config();
 
-const BATCH_SIZE = 1000; // number of documents to insert in one batch
 const IsFullReindex = process.argv[2] === "--full-reindex";
 const store = new Store();
 
@@ -22,7 +21,7 @@ const store = new Store();
         .lean()
         .cursor()
         .on("data", async (customer) => {
-          store.customersToInsert.push(customer);
+          store.add(customer);
           if (store.customersToInsert.length < BATCH_SIZE) return;
 
           cursor.pause();
@@ -35,13 +34,26 @@ const store = new Store();
           if (store.customersToInsert.length) {
             await anonCustomerBulkWrite();
           }
-          console.log("end");
-          process.exit(0);
+          endWithMsg("end full-reindex");
         });
     } else {
-      store.channel = await createSubChannel();
-      store.channel.consume(QUEUE, collectCustomers, { noAck: false });
-      setInterval(insertAndReset, 500);
+      const startAtOperationTime = await getStartAtOperationTime();
+      if (!startAtOperationTime) return endWithErr("No data to sync");
+
+      const stream = await Customer.watch([], { startAtOperationTime });
+      let customer = null;
+
+      while ((customer = await Promise.race([stream.next(), timeoutPromise]))) {
+        store.add(customer.fullDocument);
+        if (!store.isOkToInsert) continue;
+
+        await anonCustomerBulkWrite();
+        store.reset();
+      }
+
+      await anonCustomerBulkWrite();
+      await stream.close();
+      endWithMsg("end");
     }
   } catch (e) {
     endWithErr(e);
@@ -60,23 +72,17 @@ function getUpdates() {
   });
 }
 
-async function collectCustomers(msg: ConsumeMessage | null) {
-  if (!msg || store.isPaused) return;
-  const receivedData = JSON.parse(msg.content.toString() || "[]");
-  console.log("Received data", receivedData.length);
-  store.customersToInsert = [...store.customersToInsert, ...receivedData];
-  store.lastMsg = msg;
-}
-
-async function insertAndReset() {
-  if (!store.customersToInsert.length) return;
-  if (!(store.customersToInsert.length >= BATCH_SIZE || store.timeIsUp())) return;
-
-  store.pause();
-  await anonCustomerBulkWrite();
-  store.reset();
-}
-
 function anonCustomerBulkWrite() {
   return AnonCustomer.bulkWrite(getUpdates(), { ordered: false });
+}
+
+async function getStartAtOperationTime() {
+  let lastCustomer = await AnonCustomer.findOne().sort({ $natural: -1 });
+  if (!lastCustomer) lastCustomer = await Customer.findOne().sort({ $natural: 1 });
+
+  if (!lastCustomer) return;
+  return new Timestamp({
+    t: new Date(lastCustomer.createdAt).getTime() / 1000,
+    i: 1,
+  });
 }

@@ -1,6 +1,6 @@
 # test
 
-This project is a Node.js application that uses TypeScript, RabbitMQ, and MongoDB to perform certain tasks.
+This project is a Node.js application that uses TypeScript and MongoDB (with change stream) to perform certain tasks.
 
 ## Installation
 
@@ -16,17 +16,53 @@ npm install
 
 ## Configuration
 
-The application requires some configuration settings to connect to RabbitMQ and MongoDB. You can set these settings by creating a `.env` file in the project's root directory and specifying the `DB_URI` and `MQ_URI` variables, for instance:
+The application requires some configuration settings to connect to MongoDB. You can set these settings by creating a `.env` file in the project's root directory and specifying the `DB_URI` variables, for instance:
 
 ```
-DB_URI=mongodb://localhost:27017/test?retryWrites=true&w=majority
-MQ_URI=amqp://localhost:5672
+DB_URI=mongodb://127.0.0.1:27017/mongo?directConnection=true
 ```
 
-Use the following docker command to start RabbitMQ:
+Application uses MongoDB change streams, which are available for replica sets and sharded clusters. It's easier to use MongoDB Atlas for that matter. But if you want to set replica set locally use the following docker-compose file:
 
 ```
-docker run -it --rm --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3.11-management
+version: "3.4"
+
+services:
+  mongodb:
+    image: mongo
+    hostname: mongodb
+    restart: always
+    container_name: mongodb
+    ports:
+      - 27017:27017
+    networks:
+      - mongo-network
+    healthcheck:
+      test: test $$(echo "rs.initiate().ok || rs.status().ok" | mongo -u mongo -p mongo --quiet) -eq 1
+      interval: 10s
+      start_period: 30s
+    command: ["--replSet", "dbrs", "--bind_ip_all"]
+
+networks:
+  mongo-network:
+    driver: bridge
+```
+
+and the mongosh command for the mongodb inside that container:
+
+```
+var config = {
+  _id: "dbrs",
+  version: 1,
+  members: [
+    {
+      _id: 1,
+      host: "mongodb:27017",
+      priority: 2,
+    },
+  ],
+};
+rs.initiate(config, { force: true });
 ```
 
 ## Building the Application

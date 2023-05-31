@@ -1,4 +1,4 @@
-import mongoose, { ConnectOptions, Schema, Document } from "mongoose";
+import mongoose, { Schema, Document } from "mongoose";
 
 export interface ICustomer extends Document {
   firstName: string;
@@ -12,6 +12,7 @@ export interface ICustomer extends Document {
     state: string;
     country: string;
   };
+  createdAt: Date;
 }
 
 const commonSchema = {
